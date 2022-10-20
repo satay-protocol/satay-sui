@@ -18,11 +18,11 @@ module satay::vault {
         /// The CoinType to be accepted by a particular vault
         basecoin_balance: Balance<BaseCoin>,
         /// capability allowing the reserve to mint and burn VaultCoins
-        vaultcoin_supply: Supply<Witness<BaseCoin>>,
+        vaultcoin_supply: Supply<VaultCoinWitness<BaseCoin>>,
     }
 
     /// Get an immutable reference to the ID of the vault the VaultCoin belongs to.
-    public fun vault_coin_vault_id<BaseCoin>(self: &VaultCoin<BaseCoin>): &ID {
+    public fun vaultcoin_vault_id<BaseCoin>(self: &VaultCoin<BaseCoin>): &ID {
         &self.vault_id
     }
 
@@ -39,13 +39,13 @@ module satay::vault {
     /// VaultCoin token witness
     /// Witness is a pattern that is used for confirming the ownership of a type. To do so, one passes a drop instance
     /// of a type. Coin relies on this implementation. https://examples.sui.io/patterns/witness.html
-    struct Witness<phantom BaseCoin> has drop { }
+    struct VaultCoinWitness<phantom BaseCoin> has drop { }
 
     /// Represents depositor's share of vault balance
     struct VaultCoin<phantom BaseCoin> has key, store {
         id: UID,
         vault_id: ID,
-        balance: Balance<Witness<BaseCoin>>
+        balance: Balance<VaultCoinWitness<BaseCoin>>
     }
 
     /* ================= PoolAdminCap ================= */
@@ -63,12 +63,17 @@ module satay::vault {
 
     /* ================= Main logic ================= */
 
+    /* ================= public entry functions ================= */
+
     /// Initialize a new vault that only accepts BaseCoin
     /// Initialize a new VaultCoin
-    public fun new<BaseCoin>(witness: Witness<BaseCoin>, ctx: &mut TxContext) {
+    entry fun new<BaseCoin>(
+        ctx: &mut TxContext
+    ) {
+        let witness = VaultCoinWitness<BaseCoin> {};
         let id = object::new(ctx);
         // Get a treasury cap for the coin put it in the reserve
-        let vaultcoin_supply = balance::create_supply<Witness<BaseCoin>>(witness);
+        let vaultcoin_supply = balance::create_supply<VaultCoinWitness<BaseCoin>>(witness);
 
         // Transfer the AdminCap to the sender (the user calling this function)
         transfer::transfer(VaultAdminCap {
@@ -77,9 +82,9 @@ module satay::vault {
         }, tx_context::sender(ctx));
 
         // Instead of `move_to`, Sui Move uses the `transfer` API to move objects into global storage.
-        // Here, we instantiate the SharedVault object and move it into global storage (write to the blockchain).
+        // Here, we instantiate the Vault object and move it into global storage (write to the blockchain).
         // We use the `share_object` API, which turns the object into a mutable shared object that everyone can access
-        // and mutate. For something like a vault, that can be accessed permissionlessly by anyone, this is what we'll
+        // and mutate. For something like a vault that can be accessed permissionlessly by anyone, this is what we'll
         // utilize. Note: This capability is not yet fully supported in Sui. Below is what the exposed API will look like.
         transfer::share_object(Vault<BaseCoin> {
             id,
@@ -94,7 +99,12 @@ module satay::vault {
     // the function signature.
     /// Deposit a BaseCoin into a given vault, and mint and deposit a VaultCoin into the user's account representing
     /// ownership of their stake in the vault.
-    public entry fun deposit<BaseCoin>(amount: u64, basecoin: &mut Coin<BaseCoin>, vault: &mut Vault<BaseCoin>, ctx: &mut TxContext) {
+    public entry fun deposit<BaseCoin>(
+        amount: u64,
+        basecoin: &mut Coin<BaseCoin>,
+        vault: &mut Vault<BaseCoin>,
+        ctx: &mut TxContext
+    ) {
         // Assert that the user has at least as much BaseCoin in their balance as they want to deposit
         assert!(coin::value(basecoin) >= amount, EInsufficientBalance);
 
@@ -107,7 +117,39 @@ module satay::vault {
         mint_and_deposit_vaultcoin(vault, amount, ctx);
     }
 
-    fun mint_and_deposit_vaultcoin<BaseCoin>(vault: &mut Vault<BaseCoin>, amount: u64, ctx: &mut TxContext) {
+    public entry fun withdraw<BaseCoin>(
+        amount: u64,
+        vaultcoin: &mut Coin<VaultCoin<BaseCoin>>,
+        vault: &mut Vault<BaseCoin>,
+        ctx: &mut TxContext
+    ) {
+        let sender = tx_context::sender(ctx);
+
+        // Assert that the user cannot withdraw more BaseCoin than they have VaultCoin
+        // let vaultcoin_balance = coin::balance(vaultcoin);
+        assert!(coin::value<VaultCoin<BaseCoin>>(vaultcoin) >= amount, EInsufficientBalance);
+
+        // Transfer BaseCoin from the vault to the user
+        let basecoin_value = balance::value(&mut vault.basecoin_balance);
+        let temp = balance::split(&mut vault.basecoin_balance, basecoin_value);
+        transfer::transfer(
+            coin::from_balance<BaseCoin>(temp, ctx),
+            sender
+        );
+        
+        // Burn the equivalent amount of VaultCoin from the user's balance
+        // let VaultCoin<BaseCoin> { id, vault_id: _, balance: vaultcoin.balance} = vaultcoin;
+        // object::delete(id);
+        // balance::decrease_supply(&mut vault.vaultcoin_supply,)
+    }
+
+    /* ================= helper functions ================= */
+
+    fun mint_and_deposit_vaultcoin<BaseCoin>(
+        vault: &mut Vault<BaseCoin>,
+        amount: u64,
+        ctx: &mut TxContext
+    ) {
         let sender = tx_context::sender(ctx);
 
         let vaultcoin_minted = balance::increase_supply(&mut vault.vaultcoin_supply, amount);
@@ -120,30 +162,5 @@ module satay::vault {
 
         transfer::transfer(vaultcoin, sender);
     }
-
-    public entry fun withdraw<BaseCoin>(
-        amount: u64,
-        vaultcoin: &mut VaultCoin<BaseCoin>,
-        vault: &mut Vault<BaseCoin>,
-        ctx: &mut TxContext
-    ) {
-        let sender = tx_context::sender(ctx);
-
-        let basecoin_balance = &mut vault.basecoin_balance;
-        // Assert that the user cannot withdraw more BaseCoin than they have VaultCoin
-        assert!(balance::value(&vaultcoin.balance) >= amount, EInsufficientBalance);
-
-        // Transfer BaseCoin from the vault to the user
-        transfer::transfer(
-            coin::from_balance(basecoin_balance, ctx),
-            sender
-        );
-        
-        // Burn the equivalent amount of VaultCoin from the user's balance
-        // let VaultCoin<BaseCoin> { id, vault_id: _, balance: vaultcoin.balance} = vaultcoin;
-        // object::delete(id);
-        // balance::decrease_supply(&mut vault.vaultcoin_supply,)
-    }
-
 
 }
